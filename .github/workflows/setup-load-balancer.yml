@@ -26,7 +26,7 @@ jobs:
           # Define variables
           LB_NAME="my-load-balancer"
           TARGET_GROUP_NAME="my-target-group"
-          VPC_ID="vpc-046956f6b3f1225e2"
+          VPC_ID="vpc-05aff67cb6bd873ba"
           # Get all subnet IDs in the specified VPC
           SUBNET_IDS=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC_ID --query "Subnets[*].SubnetId" --output text)
           # Get all running instance IDs in the specified VPC
