@@ -1,0 +1,83 @@
+name: Load Balancer Setup
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  setup-load-balancer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Set up Load Balancer
+        run: |
+          # Define variables
+          LB_NAME="my-load-balancer"
+          TARGET_GROUP_NAME="my-target-group"
+          VPC_ID="vpc-046956f6b3f1225e2"
+          # Get all subnet IDs in the specified VPC
+          SUBNET_IDS=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC_ID --query "Subnets[*].SubnetId" --output text)
+          # Get all running instance IDs in the specified VPC
+          INSTANCE_IDS=$(aws ec2 describe-instances --filters "Name=instance-state-name,Values=running" "Name=vpc-id,Values=$VPC_ID" --query "Reservations[].Instances[].InstanceId" --output text)
+          # Get the security group attached to the first running instance
+          INSTANCE_SECURITY_GROUP=$(aws ec2 describe-instances \
+            --instance-ids $(echo $INSTANCE_IDS | awk '{print $1}') \
+            --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" \
+            --output text)
+          # Create Load Balancer with the same security group as the instance
+          LB_ARN=$(aws elbv2 create-load-balancer \
+            --name $LB_NAME \
+            --subnets $SUBNET_IDS \
+            --security-groups $INSTANCE_SECURITY_GROUP \
+            --query "LoadBalancers[0].LoadBalancerArn" --output text)
+          echo "Load Balancer ARN: $LB_ARN"
+          # Wait for Load Balancer to be provisioned
+          while [ "$(aws elbv2 describe-load-balancers --names $LB_NAME --query 'LoadBalancers[0].State.Code' --output text)" == "provisioning" ]; do
+            echo "Waiting for Load Balancer to be provisioned..."
+            sleep 10
+          done
+          echo "Load Balancer is now provisioned."
+          # Create Target Group with health check configuration
+          TG_ARN=$(aws elbv2 create-target-group \
+            --name $TARGET_GROUP_NAME \
+            --protocol HTTP \
+            --port 80 \
+            --vpc-id $VPC_ID \
+            --health-check-protocol HTTP \
+            --health-check-path / \
+            --health-check-interval-seconds 30 \
+            --query "TargetGroups[0].TargetGroupArn" \
+            --output text)
+          echo "Target Group ARN: $TG_ARN"
+          # Exit if Target Group creation fails
+          if [ -z "$TG_ARN" ]; then
+            echo "Error: Target Group ARN is empty!"
+            exit 1
+          fi
+          # Register running instances to the Target Group
+          for INSTANCE_ID in $INSTANCE_IDS; do
+            aws elbv2 register-targets \
+              --target-group-arn $TG_ARN \
+              --targets Id=$INSTANCE_ID
+          done
+          # Create a Listener for the Load Balancer
+          aws elbv2 create-listener \
+            --load-balancer-arn $LB_ARN \
+            --protocol HTTP \
+            --port 80 \
+            --default-actions Type=forward,TargetGroupArn=$TG_ARN
+          # Verify the Load Balancer and Target Group status
+          aws elbv2 describe-load-balancers --names $LB_NAME
+          aws elbv2 describe-target-health --target-group-arn $TG_ARN
